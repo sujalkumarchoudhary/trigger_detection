@@ -36,23 +36,78 @@ class TenderMonitor(BaseMonitor):
         self.seen_hashes = set()
     
     def fetch(self) -> Dict[str, Any]:
-        """Fetch tender data using SerpAPI Google Search"""
+        """Fetch tender data using SerpAPI Google Search + free RSS fallbacks"""
         data = {
             'government_tenders': [],
             'hospital_tenders': [],
         }
         
-        if not SERPAPI_KEY:
-            self.logger.warning("No SerpAPI key - tender monitoring limited")
-            return data
+        if SERPAPI_KEY:
+            # Fetch government tender news
+            data['government_tenders'] = self._fetch_govt_tender_news()
+            
+            # Fetch hospital tender news  
+            data['hospital_tenders'] = self._fetch_hospital_tender_news()
+        else:
+            self.logger.warning("No SerpAPI key - using free RSS fallbacks for tender monitoring")
         
-        # Fetch government tender news
-        data['government_tenders'] = self._fetch_govt_tender_news()
-        
-        # Fetch hospital tender news  
-        data['hospital_tenders'] = self._fetch_hospital_tender_news()
+        # Always try free RSS fallbacks (supplements SerpAPI or replaces it)
+        rss_results = self._fetch_tender_rss()
+        data['government_tenders'].extend(rss_results)
         
         return data
+    
+    def _fetch_tender_rss(self) -> List[Dict]:
+        """Fetch tender news from free RSS feeds (no API key needed)"""
+        results = []
+        
+        try:
+            import feedparser
+        except ImportError:
+            self.logger.warning("feedparser not available - skipping RSS fallbacks")
+            return results
+        
+        # Free RSS feeds that may contain tender/procurement news
+        rss_feeds = {
+            'et_pharma': 'https://economictimes.indiatimes.com/industry/healthcare/biotech/pharmaceuticals/rssfeeds/13357808.cms',
+            'bs_pharma': 'https://www.business-standard.com/rss/companies/pharma-172.rss',
+            'livemint': 'https://www.livemint.com/rss/companies/pharma',
+            'pharmabiz': 'http://www.pharmabiz.com/RSSFeed.aspx',
+        }
+        
+        tender_keywords = [
+            'tender', 'procurement', 'bid', 'contract', 'supply order',
+            'gem portal', 'government supply', 'hospital supply', 'bulk drug',
+            'rate contract', 'purchase order', 'empanelment', 'auction',
+        ]
+        
+        for source_name, feed_url in rss_feeds.items():
+            try:
+                self.logger.debug(f"Fetching tender RSS: {source_name}")
+                feed = feedparser.parse(feed_url)
+                
+                for entry in feed.entries[:15]:
+                    title = entry.get('title', '')
+                    summary = entry.get('summary', '')
+                    full_text = f"{title} {summary}".lower()
+                    
+                    # Filter for tender-relevant content
+                    if any(kw in full_text for kw in tender_keywords):
+                        results.append({
+                            'source': f'rss_{source_name}_tender',
+                            'title': title,
+                            'snippet': summary,
+                            'url': entry.get('link', ''),
+                            'date': entry.get('published', ''),
+                            'displayed_link': source_name,
+                            'type': 'government_tender',
+                        })
+                        
+            except Exception as e:
+                self.logger.debug(f"RSS fetch failed for {source_name}: {e}")
+        
+        self.logger.info(f"RSS fallback found {len(results)} tender items")
+        return results
     
     def _fetch_govt_tender_news(self) -> List[Dict]:
         """Fetch government pharmaceutical tender news via SerpAPI"""
@@ -225,7 +280,7 @@ class TenderMonitor(BaseMonitor):
                 continue
             self.seen_hashes.add(content_hash)
             
-            quantity_info = self.quantity_analyzer.analyze(content)
+            quantity_info = self.quantity_analyzer.analyze_tender(content)
             
             items.append({
                 'source': item['source'],

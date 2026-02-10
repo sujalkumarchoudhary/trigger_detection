@@ -36,27 +36,82 @@ class RegulatoryMonitor(BaseMonitor):
         self.seen_hashes = set()
     
     def fetch(self) -> Dict[str, Any]:
-        """Fetch regulatory data using SerpAPI Google Search"""
+        """Fetch regulatory data using SerpAPI Google Search + free RSS fallbacks"""
         data = {
             'cdsco': [],
             'fda_alerts': [],
             'patents': [],
         }
         
-        if not SERPAPI_KEY:
-            self.logger.warning("No SerpAPI key - regulatory monitoring limited")
-            return data
+        if SERPAPI_KEY:
+            # Fetch CDSCO approvals via Google News
+            data['cdsco'] = self._fetch_cdsco_news()
+            
+            # Fetch FDA alerts via Google News
+            data['fda_alerts'] = self._fetch_fda_news()
+            
+            # Fetch patent information via Google News
+            data['patents'] = self._fetch_patent_news()
+        else:
+            self.logger.warning("No SerpAPI key - using free RSS fallbacks for regulatory monitoring")
         
-        # Fetch CDSCO approvals via Google News
-        data['cdsco'] = self._fetch_cdsco_news()
-        
-        # Fetch FDA alerts via Google News
-        data['fda_alerts'] = self._fetch_fda_news()
-        
-        # Fetch patent information via Google News
-        data['patents'] = self._fetch_patent_news()
+        # Always try free RSS fallbacks (supplements SerpAPI or replaces it)
+        rss_results = self._fetch_regulatory_rss()
+        data['cdsco'].extend(rss_results)
         
         return data
+    
+    def _fetch_regulatory_rss(self) -> List[Dict]:
+        """Fetch regulatory news from free RSS feeds (no API key needed)"""
+        results = []
+        
+        try:
+            import feedparser
+        except ImportError:
+            self.logger.warning("feedparser not available - skipping RSS fallbacks")
+            return results
+        
+        # Free RSS feeds for regulatory/pharma news
+        rss_feeds = {
+            'fda_drug_safety': 'https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/drug-safety-and-availability/rss.xml',
+            'pharmabiz': 'http://www.pharmabiz.com/RSSFeed.aspx',
+            'et_pharma': 'https://economictimes.indiatimes.com/industry/healthcare/biotech/pharmaceuticals/rssfeeds/13357808.cms',
+            'bs_pharma': 'https://www.business-standard.com/rss/companies/pharma-172.rss',
+        }
+        
+        regulatory_keywords = [
+            'approval', 'approved', 'cdsco', 'dcgi', 'fda', 'warning letter',
+            'import alert', 'recall', 'patent', 'license', 'regulation',
+            'compliance', 'inspection', 'gmp', 'who prequalification',
+        ]
+        
+        for source_name, feed_url in rss_feeds.items():
+            try:
+                self.logger.debug(f"Fetching regulatory RSS: {source_name}")
+                feed = feedparser.parse(feed_url)
+                
+                for entry in feed.entries[:15]:
+                    title = entry.get('title', '')
+                    summary = entry.get('summary', '')
+                    full_text = f"{title} {summary}".lower()
+                    
+                    # Filter for regulatory-relevant content
+                    if any(kw in full_text for kw in regulatory_keywords):
+                        results.append({
+                            'source': f'rss_{source_name}',
+                            'title': title,
+                            'snippet': summary,
+                            'url': entry.get('link', ''),
+                            'date': entry.get('published', ''),
+                            'source_name': source_name,
+                            'type': 'drug_approval',
+                        })
+                        
+            except Exception as e:
+                self.logger.debug(f"RSS fetch failed for {source_name}: {e}")
+        
+        self.logger.info(f"RSS fallback found {len(results)} regulatory items")
+        return results
     
     def _fetch_cdsco_news(self) -> List[Dict]:
         """Fetch CDSCO approval news via SerpAPI"""

@@ -68,35 +68,67 @@ class FinancialMonitor(BaseMonitor):
         """Fetch quarterly results and future plans from financial reports"""
         results = []
         
-        # Screener.in for pharma company financials
-        screener_url = "https://www.screener.in/screens/23505/pharma-companies/"
+        # Try multiple Screener.in URLs (screen IDs can change)
+        screener_urls = [
+            "https://www.screener.in/screens/71/pharma-companies/",
+            "https://www.screener.in/screens/23505/pharma-companies/",
+        ]
         
-        try:
-            response = safe_request(screener_url)
-            if response:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Look for company results
-                table = soup.find('table')
-                if table:
-                    rows = table.find_all('tr')
-                    for row in rows[1:30]:  # Limit to 30 companies
-                        cells = row.find_all('td')
-                        if len(cells) >= 4:
-                            company_link = cells[0].find('a')
-                            company_name = clean_text(company_link.get_text()) if company_link else ''
+        screener_success = False
+        for screener_url in screener_urls:
+            try:
+                response = safe_request(screener_url, retries=1)
+                if response:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Look for company results
+                    table = soup.find('table')
+                    if table:
+                        rows = table.find_all('tr')
+                        for row in rows[1:30]:  # Limit to 30 companies
+                            cells = row.find_all('td')
+                            if len(cells) >= 4:
+                                company_link = cells[0].find('a')
+                                company_name = clean_text(company_link.get_text()) if company_link else ''
+                                
+                                results.append({
+                                    'source': 'screener',
+                                    'company': company_name,
+                                    'market_cap': clean_text(cells[1].get_text()) if len(cells) > 1 else '',
+                                    'sales_growth': clean_text(cells[2].get_text()) if len(cells) > 2 else '',
+                                    'profit_growth': clean_text(cells[3].get_text()) if len(cells) > 3 else '',
+                                    'url': company_link.get('href', screener_url) if company_link else screener_url,
+                                })
+                        if results:
+                            screener_success = True
+                            break  # Got data, stop trying other URLs
                             
-                            results.append({
-                                'source': 'screener',
-                                'company': company_name,
-                                'market_cap': clean_text(cells[1].get_text()) if len(cells) > 1 else '',
-                                'sales_growth': clean_text(cells[2].get_text()) if len(cells) > 2 else '',
-                                'profit_growth': clean_text(cells[3].get_text()) if len(cells) > 3 else '',
-                                'url': company_link.get('href', screener_url) if company_link else screener_url,
-                            })
-                            
-        except Exception as e:
-            self.logger.warning(f"Screener fetch failed: {e}")
+            except Exception as e:
+                self.logger.debug(f"Screener fetch failed for {screener_url}: {e}")
+        
+        # Fallback: MoneyControl pharma RSS for financial news
+        if not screener_success:
+            self.logger.info("Screener failed, trying MoneyControl RSS fallback")
+            try:
+                import feedparser
+                feed = feedparser.parse("https://www.moneycontrol.com/rss/pharma.xml")
+                for entry in feed.entries[:15]:
+                    title = entry.get('title', '')
+                    summary = entry.get('summary', '')
+                    full_text = f"{title} {summary}"
+                    
+                    # Filter for financial/growth indicators
+                    if any(kw in full_text.lower() for kw in 
+                           ['result', 'revenue', 'profit', 'growth', 'expansion', 
+                            'capex', 'capacity', 'revenue', 'quarter', 'annual']):
+                        results.append({
+                            'source': 'moneycontrol_rss',
+                            'company': extract_company_name(full_text) or 'Unknown',
+                            'announcement': clean_text(f"{title}. {summary}")[:300],
+                            'url': entry.get('link', ''),
+                        })
+            except Exception as e:
+                self.logger.warning(f"MoneyControl RSS fallback failed: {e}")
         
         # BSE corporate filings
         bse_url = "https://www.bseindia.com/corporates/ann.html"
